@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -262,6 +263,30 @@ type DeployRequest struct {
 type BuildRequest struct {
 	Platform
 	BuildConfig
+}
+
+// Serialize returns a deterministic string representation of this
+// build request. Like a hash, but reversible. It's designed to be
+// easy-ish to read and conveniently sortable. This function DOES
+// reorder the contents of br.BuildConfig.Plugins so they are in
+// lexicographical order. This string does NOT account for plugin
+// versions, sorry. Also, it uses plugin name instead of import
+// path for space efficiency, even though technically import path
+// might be slightly more accurate/stable. Plugin names must be
+// standardized as to case (lowercase).
+func (br BuildRequest) Serialize() string {
+	sort.Slice(br.BuildConfig.Plugins, func(i, j int) bool {
+		return br.BuildConfig.Plugins[i].Name < br.BuildConfig.Plugins[j].Name
+	})
+	var plugins string
+	for _, plugin := range br.BuildConfig.Plugins {
+		plugins += plugin.Name + ","
+	}
+	if len(plugins) > 0 {
+		plugins = plugins[:len(plugins)-1]
+	}
+	return fmt.Sprintf("%s:%s.%s.%s:%s", br.BuildConfig.CaddyVersion,
+		br.Platform.OS, br.Platform.Arch, br.Platform.ARM, plugins)
 }
 
 // Sign signs the file using the configured PGP private key
