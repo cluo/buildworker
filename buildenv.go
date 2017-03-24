@@ -804,14 +804,15 @@ func SupportedPlatforms(skip []Platform) ([]Platform, error) {
 
 const (
 	// MonthDayHourMin is the date format used in
-	// some temporary file paths.
+	// some temporary file paths
 	MonthDayHourMin = "01-02-1504"
 
 	// ParallelBuildOps is how many build operations
-	// to perform in parallel (`go build -p` value).
+	// to perform in parallel (`go build -p` value)
 	ParallelBuildOps = 4
 
-	// CaddyPackage is the import (package) path to Caddy.
+	// CaddyPackage is the import (package) path to Caddy;
+	// use the top-level path, not necessarily the 'main' package
 	CaddyPackage = "github.com/mholt/caddy"
 
 	// plugInto is the file in which plugins get plugged in

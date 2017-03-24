@@ -185,10 +185,11 @@ func httpBuild(w http.ResponseWriter, caddyVersion string, plugins []buildworker
 
 	outputFile, err := be.Build(plat, tmpdir)
 	if err != nil {
-		log.Printf("build: %v", err)
+		logStr := be.Log.String()
+		log.Printf("build: %v >>>>>>>>>>>\n%s\n<<<<<<<<<<<\n", err, logStr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: be.Log.String()})
+		json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: logStr})
 		return
 	}
 	defer outputFile.Close()
