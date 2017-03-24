@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 
+	lumberjack "gopkg.in/natefinch/lumberjack.v2"
+
 	"golang.org/x/crypto/openpgp"
 
 	"github.com/caddyserver/buildworker"
@@ -22,12 +24,30 @@ import (
 
 func init() {
 	flag.StringVar(&addr, "addr", addr, "The address (host:port) to listen on")
+	flag.StringVar(&logfile, "log", logfile, "Log file (or stdout/stderr; empty for none)")
 	setAPICredentials()
 	setSigningKey()
 }
 
 func main() {
 	flag.Parse()
+
+	// set up log before anything bad happens
+	switch logfile {
+	case "stdout":
+		log.SetOutput(os.Stdout)
+	case "stderr":
+		log.SetOutput(os.Stderr)
+	case "":
+		log.SetOutput(ioutil.Discard)
+	default:
+		log.SetOutput(&lumberjack.Logger{
+			Filename:   logfile,
+			MaxSize:    100,
+			MaxAge:     120,
+			MaxBackups: 10,
+		})
+	}
 
 	addRoute := func(method, path string, h http.HandlerFunc) {
 		http.HandleFunc(path, methodHandler(method, maxSizeHandler(authHandler(h))))
@@ -349,3 +369,5 @@ const (
 )
 
 var addr = "127.0.0.1:2017"
+
+var logfile = "buildworker.log"
