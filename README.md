@@ -5,6 +5,27 @@ Build Worker
 
 Build Worker is the Caddy build server. It maintains a cache of source code repositories in a local GOPATH so that it can build Caddy with desired plugins on demand.
 
+## Installation
+
+NOTE: You do _not_ need this program unless you wish to use the build features of the Caddy website on your own machine.
+
+```bash
+$ go get github.com/caddyserver/buildworker/cmd/buildworker
+```
+
+
+## Basic Use
+
+```
+$ buildworker
+```
+
+This will start a build worker listening on localhost. With this and the [devportal](https://github.com/caddyserver/devportal) running, you can use the [website](https://github.com/caddyserver/website)'s download and build features on your own computer.
+
+Run `buildworker -h` to see a list of flags/options.
+
+## Explanation
+
 While the `buildworker` package can be used by other programs that wish to build Caddy in dependable ways, the `main` package here adds HTTP handlers so that the Caddy website can request jobs. The build server's handlers are not directly exposed to the Internet, and all requests must be authenticated.
 
 The build server is entirely stateless. It will rebuild its GOPATH (considered merely a cache) if necessary.
@@ -18,9 +39,9 @@ The build worker is optimized for fast, on-demand builds. Deploys (a.k.a. releas
 The command of this repository is the production build server, and the library is also used by the [Caddy releaser](https://github.com/caddyserver/releaser) tool. The [Caddy developer portal](https://github.com/caddyserver/devportal), which is the backend to the Caddy website, makes requests to this build server.
 
 
-## Command Usage
+## Production Use
 
-Most basic use:
+A build worker is not exposed directly to the Internet. Credentials are set to authenticate requests from the dev portal:
 
 ```bash
 $ BUILDWORKER_CLIENT_ID=username BUILDWORKER_CLIENT_KEY=password buildworker
