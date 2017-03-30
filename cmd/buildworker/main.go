@@ -25,12 +25,25 @@ import (
 func init() {
 	flag.StringVar(&addr, "addr", addr, "The address (host:port) to listen on")
 	flag.StringVar(&logfile, "log", logfile, "Log file (or stdout/stderr; empty for none)")
+	flag.IntVar(&buildworker.UidGid, "uid", buildworker.UidGid, "The uid and gid to run commands as (-1 for no change) (use with -chroot)")
+	flag.StringVar(&buildworker.Chroot, "chroot", buildworker.Chroot, "The directory to chroot commands in (use with -uid)")
 	setAPICredentials()
 	setSigningKey()
 }
 
 func main() {
 	flag.Parse()
+
+	if buildworker.UidGid < -1 || buildworker.UidGid > 0xFFFFFFFF {
+		log.Fatal("bad uid/gid (must be uint32 or -1 to disable)")
+	}
+	if buildworker.UidGid == -1 && buildworker.Chroot == "" {
+		fmt.Println("WARNING: Running as same user and without jail!")
+	}
+	if (buildworker.UidGid == -1 && buildworker.Chroot != "") ||
+		(buildworker.UidGid != -1 && buildworker.Chroot == "") {
+		fmt.Println("WARNING: Either -uid or -chroot is set, but not both; inconsistent use!")
+	}
 
 	// set up log before anything bad happens
 	switch logfile {
@@ -168,6 +181,13 @@ func httpBuild(w http.ResponseWriter, caddyVersion string, plugins []buildworker
 		return
 	}
 	defer os.RemoveAll(tmpdir)
+	if buildworker.UidGid > -1 {
+		err = os.Chown(tmpdir, buildworker.UidGid, buildworker.UidGid)
+		if err != nil {
+			internalErr("error making temporary directory", err)
+			return
+		}
+	}
 
 	// TODO: This does a deep copy of all plugins including their
 	// testdata folders and test files. We might be able to

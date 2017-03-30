@@ -200,7 +200,11 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 		if info.IsDir() {
 			subdir := strings.TrimPrefix(path, src)
 			destdir := filepath.Join(dest, subdir)
-			return os.MkdirAll(destdir, info.Mode()&os.ModePerm)
+			err := os.MkdirAll(destdir, info.Mode()&os.ModePerm)
+			if err != nil {
+				return err
+			}
+			return chown(destdir)
 		}
 
 		// open source file
@@ -216,6 +220,10 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 			if _, err := os.Stat(destpath); err == nil {
 				return fmt.Errorf("opening destination (which already exists): %v", err)
 			}
+			return err
+		}
+		err = chown(destpath)
+		if err != nil {
 			return err
 		}
 

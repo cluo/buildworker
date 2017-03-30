@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mholt/archiver"
@@ -82,6 +83,10 @@ func (be BuildEnv) provision() error {
 		if err != nil {
 			return err
 		}
+		err = chown(be.tmpGopath)
+		if err != nil {
+			return err
+		}
 	}
 
 	// before provisioning the temporary GOPATH,
@@ -121,6 +126,10 @@ func (be BuildEnv) provision() error {
 		if err != nil {
 			return fmt.Errorf("git fetch %s: %v", pkg, err)
 		}
+
+		// TODO: gitPull? (so branch versions can be updated from origin;
+		// alternative is to have user specify version of "origin/branchname",
+		// which is what we have them do now).
 
 		// if multiple plugins share a repository, both plugins end up
 		// at the same version since only the last git checkout "sticks".
@@ -265,7 +274,11 @@ func (be BuildEnv) RepoPath(pkg string) string {
 // responsibility to remove the gopath when finished.
 func newTemporaryGopath() (string, error) {
 	ts := time.Now().Format(MonthDayHourMin)
-	return ioutil.TempDir("", fmt.Sprintf("gopath_%s.", ts))
+	tmp, err := ioutil.TempDir("", fmt.Sprintf("gopath_%s.", ts))
+	if err != nil {
+		return tmp, err
+	}
+	return tmp, chown(tmp)
 }
 
 // setEnvGopath sets the GOPATH variable in env
@@ -284,6 +297,14 @@ func setEnvGopath(env []string, to string) {
 // a GOPATH variable that uses *both* the master and temporary
 // GOPATHs. If this command should only use one GOPATH, be sure
 // to call setEnvGopath() to change it.
+//
+// If Chroot is enabled, the Dir field on the returned Cmd will
+// be set to "/" which guarantees that the command will run from
+// a directory that exists within the jail ("/" always exists).
+// If Chroot is not enabled (empty string), then the Dir field
+// will not be set. If you need to run the command from a
+// certain directory, you can certainly change the value of the
+// Dir field.
 func (be BuildEnv) newCommand(command string, args ...string) *exec.Cmd {
 	cmd := exec.Command(command, args...)
 	cmd.Env = []string{
@@ -293,6 +314,20 @@ func (be BuildEnv) newCommand(command string, args ...string) *exec.Cmd {
 	}
 	cmd.Stdout = be.Log
 	cmd.Stderr = be.Log
+	if Chroot != "" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: Chroot}
+		cmd.Dir = "/" // should have no effect on "go get" (for example), but needed if chroot'ed
+	}
+	if UidGid > -1 {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = new(syscall.SysProcAttr)
+		}
+		cmd.SysProcAttr.Setsid = true
+		cmd.SysProcAttr.Credential = &syscall.Credential{
+			Uid: uint32(UidGid),
+			Gid: uint32(UidGid),
+		}
+	}
 	return cmd
 }
 
@@ -373,6 +408,10 @@ func (be BuildEnv) backupMasterGopath() (string, error) {
 	rlock(be.masterGopath)
 	defer runlock(be.masterGopath)
 	tmpdir, err := ioutil.TempDir("", "gopath_backup_")
+	if err != nil {
+		return tmpdir, err
+	}
+	err = chown(tmpdir)
 	if err != nil {
 		return tmpdir, err
 	}
@@ -801,6 +840,34 @@ func SupportedPlatforms(skip []Platform) ([]Platform, error) {
 
 	return platforms, nil
 }
+
+// chown runs os.Chown on file to UidGid if
+// UidGid is set to a value greater than -1.
+// It does nothing otherwise.
+func chown(file string) error {
+	if UidGid > -1 {
+		return os.Chown(file, UidGid, UidGid)
+	}
+	return nil
+}
+
+// These variables are related to security when running
+// commands, which may execute arbitrary code. The system
+// running this buildworker program must be carefully
+// provisioned for these features to deliver their intended
+// security benefits. Thorough testing should be performed
+// to ensure proper functionality.
+var (
+	// UidGid is the uid and gid to run commands as
+	// and to set file ownership to. A value of -1
+	// will cause no changes in ownership or the
+	// uid/gid of commands.
+	UidGid = -1
+
+	// Chroot is the directory to in which to jail
+	// commands. An empty Chroot will disable jailing.
+	Chroot string
+)
 
 const (
 	// MonthDayHourMin is the date format used in
