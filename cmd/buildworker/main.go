@@ -389,8 +389,8 @@ var (
 
 // Key for signing binaries/archives
 const (
-	defaultSigningKeyFile  = "private_key.asc"
-	defaultKeyPasswordFile = "private_key_password.txt"
+	defaultSigningKeyFile  = "signing_key.asc"
+	defaultKeyPasswordFile = "signing_key_password.txt"
 )
 
 var addr = "127.0.0.1:2017"
