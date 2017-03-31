@@ -701,15 +701,6 @@ func (be BuildEnv) plugInThePlugin(pkg string) error {
 func (be BuildEnv) goBuildChecks(pkg string, requiredPlatforms []Platform) error {
 	for _, platform := range requiredPlatforms {
 		cgo := "CGO_ENABLED=0"
-		if platform.OS == "darwin" {
-			// TODO.
-			// As of Go 1.6, darwin might have some trouble if cgo is disabled.
-			// https://www.reddit.com/r/golang/comments/46bd5h/ama_we_are_the_go_contributors_ask_us_anything/d03rmc9
-			// As of Go 1.8beta3, this may not be necessary:
-			// https://twitter.com/bradfitz/status/811630858742341632
-			// https://github.com/golang/go/commit/3357daa96e2b04f83be70d29b70858ddc7c803f4
-			cgo = "CGO_ENABLED=1"
-		}
 		be.log.Printf("GOOS=%s GOARCH=%s GOARM=%s go build", platform.OS, platform.Arch, platform.ARM)
 		cmd := be.newCommand("go", "build", "-p", strconv.Itoa(ParallelBuildOps), pkg+"/...")
 		for _, env := range []string{
@@ -740,15 +731,6 @@ func (be BuildEnv) buildCaddy(plat Platform, outputFile string) error {
 		return err
 	}
 	cgo := "CGO_ENABLED=0"
-	if plat.OS == "darwin" {
-		// TODO.
-		// As of Go 1.6, darwin might have some trouble if cgo is disabled.
-		// https://www.reddit.com/r/golang/comments/46bd5h/ama_we_are_the_go_contributors_ask_us_anything/d03rmc9
-		// As of Go 1.8beta3, this may not be necessary:
-		// https://twitter.com/bradfitz/status/811630858742341632
-		// https://github.com/golang/go/commit/3357daa96e2b04f83be70d29b70858ddc7c803f4
-		cgo = "CGO_ENABLED=1"
-	}
 	cmd := be.newCommand("go", "build", "-ldflags", ldflags, "-o", outputFile)
 	cmd.Dir = filepath.Join(be.TemporaryPath(CaddyPackage), "caddy")
 	for _, env := range []string{
