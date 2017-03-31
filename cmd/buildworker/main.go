@@ -82,20 +82,22 @@ func main() {
 
 		be, err := buildworker.Open(info.CaddyVersion, nil)
 		if err != nil {
-			log.Printf("setting up deploy environment: %v", err)
+			logStr := be.Log.String()
+			log.Printf("setting up build env to deploy Caddy: %v >>>>>>>>>>>\n%s\n<<<<<<<<<<<\n", err, logStr)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: be.Log.String()})
+			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: logStr})
 			return
 		}
 		defer be.Close()
 
 		err = be.Deploy(nil) // no required platforms since checks should have already been performed
 		if err != nil {
-			log.Printf("deploying Caddy: %v", err)
+			logStr := be.Log.String()
+			log.Printf("deploying Caddy: %v >>>>>>>>>>>\n%s\n<<<<<<<<<<<\n", err, logStr)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: be.Log.String()})
+			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: logStr})
 			return
 		}
 	})
@@ -128,10 +130,11 @@ func main() {
 
 		err = be.Deploy(info.RequiredPlatforms)
 		if err != nil {
-			log.Printf("deploying plugin: %v", err)
+			logStr := be.Log.String()
+			log.Printf("deploying plugin: %v >>>>>>>>>>>\n%s\n<<<<<<<<<<<\n", err, logStr)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: be.Log.String()})
+			json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: logStr})
 			return
 		}
 	})
@@ -195,7 +198,8 @@ func httpBuild(w http.ResponseWriter, caddyVersion string, plugins []buildworker
 	// to only copy certain things if we want it to...
 	be, err := buildworker.Open(caddyVersion, plugins)
 	if err != nil {
-		log.Printf("creating build env: %v", err)
+		logStr := be.Log.String()
+		log.Printf("creating build env: %v >>>>>>>>>>>\n%s\n<<<<<<<<<<<\n", err, logStr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(Error{Message: err.Error(), Log: be.Log.String()})
