@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/openpgp"
@@ -152,14 +153,72 @@ func dirExists(dir string) bool {
 	return info.IsDir()
 }
 
-// deepCopy makes a deep file copy of src into dest, overwriting any existing files.
-// If an error occurs, not all files were copied successfully. This function blocks.
-// If skipHidden is true, files and folders with names beginning with "." are skipped.
-// If skipTestFiles is true, files ending with "_test.go" and folders named "testdata"
-// are skipped. If skipSymlinks is true, symbolic links will not be evaluated and will
-// be skipped.
-func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks bool) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+// deepCopyConfig configures a deep copy.
+type deepCopyConfig struct {
+	Source        string // source folder
+	Dest          string // destination folder
+	SkipHidden    bool   // skip hidden files (files or folders starting with ".")
+	SkipSymLinks  bool   // skip symbolic links
+	SkipTestFiles bool   // skips *_test.go files and testdata folders - TODO: doesn't generalize well; maybe a SkipFn instead?
+	PreserveOwner bool   // preserve file/folder ownership
+}
+
+// deepCopy makes a deep copy according to cfg, overwriting any existing files.
+// cfg.Source and cfg.Dest are required. File and folder permissions are always
+// preserved. If an error is returned, not all files were copied successfully.
+// This function blocks.
+func deepCopy(cfg deepCopyConfig) error {
+	if cfg.Source == "" || cfg.Dest == "" {
+		return fmt.Errorf("no source or no destination; both required")
+	}
+
+	setOwner := func(srcInfo os.FileInfo, destPath string) error {
+		if cfg.PreserveOwner {
+			statT := srcInfo.Sys().(*syscall.Stat_t)
+			err := os.Chown(destPath, int(statT.Uid), int(statT.Gid))
+			if err != nil {
+				return fmt.Errorf("chown (preserving) destination file: %v", err)
+			}
+			return nil
+		} else {
+			return chown(destPath)
+		}
+	}
+
+	// prewalk: start by making destination directory
+	// (can't skip this by using MkdirAll in Walk
+	// because Chown would only change the leaf
+	// directory, not any parents it created; we
+	// must do each dir individually - however,
+	// this only applies if we're trying to change
+	// the owner as if that user did the copy)
+	srcInfo, err := os.Stat(cfg.Source)
+	if err != nil {
+		return err
+	}
+	destComponents := strings.Split(cfg.Dest, string(filepath.Separator))
+	if len(destComponents) > 0 && destComponents[0] == "" {
+		destComponents[0] = "/"
+	}
+	for i := range destComponents {
+		destSoFar := filepath.Join(destComponents[:i+1]...)
+		_, err := os.Stat(destSoFar)
+		if os.IsNotExist(err) {
+			err = os.Mkdir(destSoFar, srcInfo.Mode()&os.ModePerm)
+			if err != nil {
+				return err
+			}
+			err = setOwner(srcInfo, destSoFar)
+			if err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+	}
+
+	// now traverse the source directory and copy each file
+	return filepath.Walk(cfg.Source, func(path string, info os.FileInfo, err error) error {
 		// error accessing current file
 		if err != nil {
 			return err
@@ -174,12 +233,12 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 		}
 
 		// skip symlinks, if requested
-		if skipSymlinks && (info.Mode()&os.ModeSymlink > 0) {
+		if cfg.SkipSymLinks && (info.Mode()&os.ModeSymlink > 0) {
 			return nil
 		}
 
 		// skip hidden folders, if requested
-		if skipHidden && info.Name()[0] == '.' {
+		if cfg.SkipHidden && info.Name()[0] == '.' {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -187,7 +246,7 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 		}
 
 		// skip testdata folders and _test.go files, if requested
-		if skipTestFiles {
+		if cfg.SkipTestFiles {
 			if info.IsDir() && info.Name() == "testdata" {
 				return filepath.SkipDir
 			}
@@ -196,15 +255,18 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 			}
 		}
 
-		// if directory, create destination directory
+		// if directory, create destination directory (if not
+		// already created by our pre-walk)
 		if info.IsDir() {
-			subdir := strings.TrimPrefix(path, src)
-			destdir := filepath.Join(dest, subdir)
-			err := os.MkdirAll(destdir, info.Mode()&os.ModePerm)
-			if err != nil {
-				return err
+			subdir := strings.TrimPrefix(path, cfg.Source)
+			destDir := filepath.Join(cfg.Dest, subdir)
+			if _, err := os.Stat(destDir); os.IsNotExist(err) {
+				err := os.Mkdir(destDir, info.Mode()&os.ModePerm)
+				if err != nil {
+					return err
+				}
 			}
-			return chown(destdir)
+			return setOwner(info, destDir)
 		}
 
 		// open source file
@@ -213,18 +275,21 @@ func deepCopy(src string, dest string, skipHidden, skipTestFiles, skipSymlinks b
 			return err
 		}
 
-		destpath := filepath.Join(dest, strings.TrimPrefix(path, src))
-		fdest, err := os.OpenFile(destpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode()&os.ModePerm)
+		// create destination file
+		destPath := filepath.Join(cfg.Dest, strings.TrimPrefix(path, cfg.Source))
+		fdest, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode()&os.ModePerm)
 		if err != nil {
 			fsrc.Close()
-			if _, err := os.Stat(destpath); err == nil {
+			if _, err := os.Stat(destPath); err == nil {
 				return fmt.Errorf("opening destination (which already exists): %v", err)
 			}
 			return err
 		}
-		err = chown(destpath)
+
+		// set ownership of file
+		err = setOwner(info, destPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("chown destination file: %v", err)
 		}
 
 		// copy the file and ensure it gets flushed to disk

@@ -79,7 +79,9 @@ func Open(caddyVersion string, plugins []CaddyPlugin) (BuildEnv, error) {
 func (be BuildEnv) provision() error {
 	// make temporary GOPATH if not already there
 	if !dirExists(be.tmpGopath) {
-		err := os.MkdirAll(be.tmpGopath, 0755)
+		// Note: if more than 1 directory is created here,
+		// only the leaf will be chown'ed!
+		err := os.MkdirAll(be.tmpGopath, 0766)
 		if err != nil {
 			return err
 		}
@@ -115,7 +117,12 @@ func (be BuildEnv) provision() error {
 		// copy the repo once; however, this does present a conflict
 		// if the plugins are requested at different versions.
 		if !dirExists(destRepoPath) {
-			err := deepCopy(srcRepoPath, destRepoPath, false, false, true)
+			err := deepCopy(deepCopyConfig{
+				Source:        srcRepoPath,
+				Dest:          destRepoPath,
+				SkipSymLinks:  true,
+				PreserveOwner: true,
+			})
 			if err != nil {
 				return fmt.Errorf("copying %s to %s: %v", srcRepoPath, destRepoPath, err)
 			}
@@ -218,6 +225,7 @@ func (be BuildEnv) fillMasterGopath() error {
 			// go get its main package and all its dependencies.
 			pkg += "/..."
 		}
+
 		cmd := be.newCommand("go", "get", "-d", "-t", "-x", pkg)
 		setEnvGopath(cmd.Env, be.masterGopath)
 		err := be.runCommand(cmd)
@@ -316,17 +324,17 @@ func (be BuildEnv) newCommand(command string, args ...string) *exec.Cmd {
 	cmd.Stderr = be.Log
 	if Chroot != "" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: Chroot}
-		cmd.Dir = "/" // should have no effect on "go get" (for example), but needed if chroot'ed
+		cmd.Dir = "/" // should have no effect on "go get" (for example), but needed for "go get" if chroot'ed
 	}
 	if UidGid > -1 {
 		if cmd.SysProcAttr == nil {
 			cmd.SysProcAttr = new(syscall.SysProcAttr)
 		}
-		cmd.SysProcAttr.Setsid = true
 		cmd.SysProcAttr.Credential = &syscall.Credential{
 			Uid: uint32(UidGid),
 			Gid: uint32(UidGid),
 		}
+		cmd.SysProcAttr.Setsid = true
 	}
 	return cmd
 }
@@ -392,7 +400,7 @@ func (be BuildEnv) Deploy(requiredPlatforms []Platform) error {
 		err2 := be.restoreMasterGopath(backupGopath)
 		if err2 != nil {
 			// well, this is terrible. we now have multiple
-			// GOPATHs that don't work. just gonna cry.
+			// GOPATHs that don't work. just cry.
 			return fmt.Errorf("%v; additionally, error restoring GOPATH: %v", err, err2)
 		}
 	}
@@ -400,52 +408,96 @@ func (be BuildEnv) Deploy(requiredPlatforms []Platform) error {
 	return err
 }
 
-// backupMasterGopath copies the master GOPATH of the build
-// environment to a temporary location and returns that location.
-// It is the caller's responsibility to delete it when no
-// longer needed. If an error is returned, no need to clean up.
+// backupMasterGopath copies the src directory of the master
+// GOPATH of the build environment to a temporary location and
+// returns that location. It is the caller's responsibility to
+// delete it when no longer needed. If an error is returned, no
+// need to clean up.
 func (be BuildEnv) backupMasterGopath() (string, error) {
 	rlock(be.masterGopath)
 	defer runlock(be.masterGopath)
-	tmpdir, err := ioutil.TempDir("", "gopath_backup_")
+
+	// only back up the src directory; we don't want to mess
+	// with the top-level GOPATH folder in case it is being
+	// linked to or bind mounted, etc.
+	src := filepath.Join(be.masterGopath, "src")
+
+	// make temporary folder to hold the backup
+	tmpdir, err := ioutil.TempDir("", "src_backup_")
 	if err != nil {
-		return tmpdir, err
+		return tmpdir, fmt.Errorf("getting temporary directory for GOPATH src backup: %v", err)
 	}
-	err = chown(tmpdir)
+
+	// As of Go 1.8, Go sets the permissions on a temporary directory
+	// to 0700, but we should preserve the permissions in case we need
+	// to restore it, since the copy will replicate the permissions too.
+	srcInfo, err := os.Stat(src)
 	if err != nil {
-		return tmpdir, err
+		return tmpdir, fmt.Errorf("stat master GOPATH src: %v", err)
 	}
-	err = deepCopy(be.masterGopath, tmpdir, false, false, true)
+	err = os.Chmod(tmpdir, srcInfo.Mode())
+	if err != nil {
+		return tmpdir, fmt.Errorf("chmod temporary backup GOPATH src: %v", err)
+	}
+	statT := srcInfo.Sys().(*syscall.Stat_t)
+	err = os.Chown(tmpdir, int(statT.Uid), int(statT.Gid))
+	if err != nil {
+		return tmpdir, fmt.Errorf("chown temporary backup GOPATH src: %v", err)
+	}
+
+	// then do the actual deep copy; we only need the src folder
+	// since pkg and bin can be re-created if necessary (unlikely)
+	err = deepCopy(deepCopyConfig{
+		Source:        src,
+		Dest:          tmpdir,
+		SkipSymLinks:  true,
+		PreserveOwner: true,
+	})
 	if err != nil {
 		os.RemoveAll(tmpdir)
 	}
 	return tmpdir, err
 }
 
-// restoreMasterGopath copies the backup GOPATH at tmpdir
-// back into the build environment's master GOPATH; it fully
-// replaces the existing master GOPATH with the contents
-// of the backup but does not change the path of the master
-// GOPATH. An error returned from this function is awful, sorry.
-// This function does NOT clean up the tmpdir that is passed in.
-func (be BuildEnv) restoreMasterGopath(tmpdir string) error {
+// restoreMasterGopath copies the backup GOPATH src folder
+// at backupDir back into the build environment's master GOPATH's
+// src folder; it fully replaces the existing master GOPATH's
+// src folder with the contents of the backup but does not
+// change the path of the master GOPATH or its src folder. An
+// error returned from this function is awful, sorry. This
+// function does NOT clean up the backupDir that is passed in.
+func (be BuildEnv) restoreMasterGopath(backupDir string) error {
 	lock(be.masterGopath)
 	defer unlock(be.masterGopath)
 
-	// rename the master GOPATH so we have a clean
+	// only restore the src folder! because we move/rename
+	// this top level folder, we do not want to do that to
+	// the top GOPATH folder because it may be mounted or
+	// linked to and renaming it breaks things; but we should
+	// be able to move/rename the src subfolder alright.
+	dest := filepath.Join(be.masterGopath, "src")
+
+	// rename the master src folder so we have a clean
 	// destination to copy into; safer than deleting
 	// our master copy before the restore is successful
-	suffix := fmt.Sprintf("%d", rand.Intn(9000)+1000)
-	tmpPath := be.masterGopath + "_tmp_" + suffix
-	err := os.Rename(be.masterGopath, tmpPath)
+	// (this DOES break any bind mounts or links that
+	// point to it!)
+	suffix := fmt.Sprintf("%d", rand.Intn(90000)+10000)
+	tmpPath := dest + "_tmp_" + suffix
+	err := os.Rename(dest, tmpPath)
 	if err != nil {
 		return err
 	}
 
 	// copy the files back over
-	err = deepCopy(tmpdir, be.masterGopath, false, false, true)
+	err = deepCopy(deepCopyConfig{
+		Source:        backupDir,
+		Dest:          dest,
+		SkipSymLinks:  true,
+		PreserveOwner: true,
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("copy for restoring master GOPATH src: %v; old master src left intact: %s", err, tmpPath)
 	}
 
 	// copy successful, so clean up by deleting the original GOPATH
@@ -454,7 +506,12 @@ func (be BuildEnv) restoreMasterGopath(tmpdir string) error {
 		return err
 	}
 
-	return err
+	// also delete pkg and bin directories that were there;
+	// they can be remade and may be stale
+	os.RemoveAll(filepath.Join(be.masterGopath, "pkg"))
+	os.RemoveAll(filepath.Join(be.masterGopath, "bin"))
+
+	return nil
 }
 
 // packageToDeploy returns the name of the package
