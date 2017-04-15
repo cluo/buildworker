@@ -31,11 +31,11 @@ import (
 // should be "closed" after it is opened successfully
 // to clean up any temporary assets.
 type BuildEnv struct {
-	masterGopath string
-	tmpGopath    string
-	pkgs         map[string]string // map of package to version
-	log          *log.Logger
-	Log          *bytes.Buffer
+	masterGopath string            // path to the master GOPATH (cache)
+	tmpGopath    string            // path to temporary GOPATH created just for this BuildEnv
+	pkgs         map[string]string // map of package to version that matter to this BuildEnv
+	log          *log.Logger       // the logger to write to
+	Log          *bytes.Buffer     // stores the output of this BuildEnv's log
 }
 
 // Open creates a new, provisioned build environment with caddy
@@ -654,28 +654,44 @@ func (be BuildEnv) RunCaddyChecks() error {
 }
 
 // Build performs a build for the given platform and places the
-// resulting file on disk in outputFolder. It returns the
-// result open for reading. It is the caller's responsibility
-// to clean up the file when finished with it. Builds are
-// performed by plugging in all the plugins configured for
-// this build environment and bundling all distribution
-// assets into an archive with the binary.
+// resulting archive file on disk in outputFolder. It returns the
+// archive open for reading. It is the caller's responsibility
+// to clean up the archive file when finished with it. Builds are
+// performed by plugging in all the plugins configured for this
+// build environment and bundling all distribution assets into an
+// archive file with the binary.
 func (be BuildEnv) Build(plat Platform, outputFolder string) (*os.File, error) {
 	if plat.OS == "" || plat.Arch == "" {
 		return nil, fmt.Errorf("missing required information: OS or arch")
 	}
 
-	// plug in the plugins
-	for pkg := range be.pkgs {
-		if pkg == CaddyPackage {
-			continue // caddy core is not a plugin
-		}
-		err := be.plugInThePlugin(pkg)
-		if err != nil {
-			return nil, fmt.Errorf("plugging in %s: %v", pkg, err)
-		}
+	// what to call the resulting binary
+	binaryOutputName := "caddy"
+	if plat.OS == "windows" {
+		binaryOutputName += ".exe"
+	}
+	binaryOutputPath := filepath.Join(outputFolder, binaryOutputName)
+
+	// perform build
+	err := be.buildCaddy(plat, binaryOutputPath)
+	if err != nil {
+		return nil, fmt.Errorf("building caddy: %v", err)
+	}
+	defer os.Remove(binaryOutputPath)
+
+	// choose .tar.gz or .zip format depending on OS
+	compressZip := plat.OS == "windows" || plat.OS == "darwin"
+
+	// select files to include in the archive
+	fileList := []string{
+		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "README.txt"),
+		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "LICENSES.txt"),
+		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "CHANGES.txt"),
+		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "init"),
+		binaryOutputPath,
 	}
 
+	// construct the file name for the archive
 	caddyVer, ok := be.pkgs[CaddyPackage]
 	if !ok { // shouldn't happen, but whatever
 		caddyVer = "master"
@@ -690,32 +706,9 @@ func (be BuildEnv) Build(plat Platform, outputFolder string) (*os.File, error) {
 	if len(be.pkgs) > 1 { // one will be caddy itself
 		outputName += "_custom"
 	}
-
-	binaryOutputName := "caddy"
-	if plat.OS == "windows" {
-		binaryOutputName += ".exe"
-	}
-	binaryOutputPath := filepath.Join(outputFolder, binaryOutputName)
-
-	err := be.buildCaddy(plat, binaryOutputPath)
-	if err != nil {
-		return nil, fmt.Errorf("building caddy: %v", err)
-	}
-	defer os.Remove(binaryOutputPath)
-
-	// choose .tar.gz or .zip format depending on OS
-	compressZip := plat.OS == "windows" || plat.OS == "darwin"
-
-	fileList := []string{
-		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "README.txt"),
-		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "LICENSES.txt"),
-		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "CHANGES.txt"),
-		filepath.Join(be.TemporaryPath(CaddyPackage), "dist", "init"),
-		binaryOutputPath,
-	}
-
 	finalOutputPath := filepath.Join(outputFolder, outputName)
 
+	// create archive
 	if compressZip {
 		finalOutputPath += ".zip"
 		err = archiver.Zip.Make(finalOutputPath, fileList)
@@ -727,6 +720,7 @@ func (be BuildEnv) Build(plat Platform, outputFolder string) (*os.File, error) {
 		return nil, fmt.Errorf("error compressing: %v", err)
 	}
 
+	// return opened archive so it can be read immediately
 	return os.Open(finalOutputPath)
 }
 
@@ -757,11 +751,10 @@ func (be BuildEnv) plugInThePlugin(pkg string) error {
 // goBuildChecks cross-compiles pkg for all requiredPlatforms.
 func (be BuildEnv) goBuildChecks(pkg string, requiredPlatforms []Platform) error {
 	for _, platform := range requiredPlatforms {
-		cgo := "CGO_ENABLED=0"
 		be.log.Printf("GOOS=%s GOARCH=%s GOARM=%s go build", platform.OS, platform.Arch, platform.ARM)
 		cmd := be.newCommand("go", "build", "-p", strconv.Itoa(ParallelBuildOps), pkg+"/...")
 		for _, env := range []string{
-			cgo,
+			"CGO_ENABLED=0",
 			"GOOS=" + platform.OS,
 			"GOARCH=" + platform.Arch,
 			"GOARM=" + platform.ARM,
@@ -779,19 +772,37 @@ func (be BuildEnv) goBuildChecks(pkg string, requiredPlatforms []Platform) error
 }
 
 // buildCaddy builds caddy for the given platform and puts the
-// binary at outputFile. The outputFile path will be relative
-// to the folder where Caddy's main() function is defined (or it
-// can be an absolute path).
+// binary at outputFile. As part of the build process, the plugins
+// specified in the BuildEnv will be plugged in. The outputFile
+// path will be relative to the folder where Caddy's main()
+// function is defined (or it can be an absolute path).
 func (be BuildEnv) buildCaddy(plat Platform, outputFile string) error {
+	// make ldflags before plugging in the plugins; changing the source
+	// file(s) affects the result of the ldflags which are designed to
+	// record any changes to the source code, but we want caddy that
+	// comes from the build server to have a clean version even with
+	// plugins plugged in.
 	ldflags, err := makeLdFlags(be.TemporaryPath(CaddyPackage))
 	if err != nil {
-		return err
+		return fmt.Errorf("making ldflags: %v", err)
 	}
-	cgo := "CGO_ENABLED=0"
+
+	// plug in the plugins
+	for pkg := range be.pkgs {
+		if pkg == CaddyPackage {
+			continue // caddy core is not a plugin
+		}
+		err := be.plugInThePlugin(pkg)
+		if err != nil {
+			return fmt.Errorf("plugging in %s: %v", pkg, err)
+		}
+	}
+
+	// perform build
 	cmd := be.newCommand("go", "build", "-ldflags", ldflags, "-o", outputFile)
-	cmd.Dir = filepath.Join(be.TemporaryPath(CaddyPackage), "caddy")
+	cmd.Dir = filepath.Join(be.TemporaryPath(CaddyPackage), "caddy") // main() func is in this subfolder
 	for _, env := range []string{
-		cgo,
+		"CGO_ENABLED=0",
 		"GOOS=" + plat.OS,
 		"GOARCH=" + plat.Arch,
 		"GOARM=" + plat.ARM,

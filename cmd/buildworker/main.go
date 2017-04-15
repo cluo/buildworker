@@ -219,12 +219,16 @@ func httpBuild(w http.ResponseWriter, caddyVersion string, plugins []buildworker
 	defer outputFile.Close()
 	name := filepath.Base(outputFile.Name())
 
-	signatureBuf, err := buildworker.Sign(outputFile)
-	if err != nil {
-		internalErr("signing archive", err)
-		return
+	var signatureName string
+	var signatureBuf *bytes.Buffer
+	if buildworker.Signer != nil {
+		signatureBuf, err = buildworker.Sign(outputFile)
+		if err != nil {
+			internalErr("signing archive", err)
+			return
+		}
+		signatureName = name + ".asc"
 	}
-	signatureName := name + ".asc"
 
 	_, err = outputFile.Seek(0, 0)
 	if err != nil {
@@ -234,17 +238,19 @@ func httpBuild(w http.ResponseWriter, caddyVersion string, plugins []buildworker
 
 	writer := multipart.NewWriter(w)
 	w.Header().Set("Content-Type", writer.FormDataContentType())
-	part, err := writer.CreateFormFile("signature", signatureName)
-	if err != nil {
-		internalErr("creating signature form file", err)
-		return
+	if buildworker.Signer != nil {
+		part, err := writer.CreateFormFile("signature", signatureName)
+		if err != nil {
+			internalErr("creating signature form file", err)
+			return
+		}
+		_, err = io.Copy(part, signatureBuf)
+		if err != nil {
+			internalErr("copying signature into form", err)
+			return
+		}
 	}
-	_, err = io.Copy(part, signatureBuf)
-	if err != nil {
-		internalErr("copying signature into form", err)
-		return
-	}
-	part, err = writer.CreateFormFile("archive", name)
+	part, err := writer.CreateFormFile("archive", name)
 	if err != nil {
 		internalErr("creating archive form file", err)
 		return
@@ -332,8 +338,10 @@ func setSigningKey() {
 	// open key file
 	privKeyFile, err := os.Open(signingKeyFile)
 	if err != nil {
-		if os.IsNotExist(err) && signingKeyFile == defaultKeyPasswordFile {
-			return // no signing enabled, but not a problem
+		if os.IsNotExist(err) && signingKeyFile == defaultSigningKeyFile {
+			// no signing enabled, but not a problem for dev environments
+			fmt.Printf("WARNING: Signing key '%s' not found; signed builds will be unavailable.\n", signingKeyFile)
+			return
 		}
 		log.Fatalf("unable to load signing key file: %v", err)
 	}
