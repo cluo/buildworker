@@ -798,8 +798,11 @@ func (be BuildEnv) buildCaddy(plat Platform, outputFile string) error {
 		}
 	}
 
-	// perform build
-	cmd := be.newCommand("go", "build", "-ldflags", ldflags, "-o", outputFile)
+	// perform reproducible build (by stripping our unique gopath out of the binaries)
+	args := []string{"build", "-ldflags", ldflags, "-o", outputFile}
+	args = append(args, "-asmflags", fmt.Sprintf("-trimpath=%s", be.tmpGopath))
+	args = append(args, "-gcflags", fmt.Sprintf("-trimpath=%s", be.tmpGopath))
+	cmd := be.newCommand("go", args...)
 	cmd.Dir = filepath.Join(be.TemporaryPath(CaddyPackage), "caddy") // main() func is in this subfolder
 	for _, env := range []string{
 		"CGO_ENABLED=0",
